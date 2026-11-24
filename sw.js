@@ -1,8 +1,11 @@
 /* Фокус — service worker
- * Navigations & HTML: network-first (fresh versions win).
+ * Navigations & HTML: network-first with 4s timeout → cache fallback.
+ *   (Троттлинг вешает соединение, а не рвёт его — поэтому таймаут,
+ *   а не только .catch: приложение открывается даже когда хостинг «лежит».)
  * Static assets: cache-first with background refill.
  */
-const CACHE = 'focus-v1'
+const CACHE = 'focus-v2'
+const NAV_TIMEOUT_MS = 4000
 const ASSET_EXT = /\.(?:js|css|png|jpg|jpeg|svg|webp|woff2?|ttf|ico|webmanifest)$/i
 
 self.addEventListener('install', (event) => {
@@ -20,6 +23,25 @@ self.addEventListener('activate', (event) => {
   )
 })
 
+function fetchWithTimeout(request, ms) {
+  return new Promise((resolve, reject) => {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => {
+      ctrl.abort()
+      reject(new Error('navigation timeout'))
+    }, ms)
+    fetch(request, { signal: ctrl.signal })
+      .then((res) => {
+        clearTimeout(timer)
+        resolve(res)
+      })
+      .catch((err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
+  })
+}
+
 self.addEventListener('fetch', (event) => {
   const { request } = event
   if (request.method !== 'GET') return
@@ -28,17 +50,19 @@ self.addEventListener('fetch', (event) => {
   // Never intercept cross-origin (fonts etc.) — let the browser handle them
   if (url.origin !== self.location.origin) return
 
-  // HTML / navigations: network-first
+  // HTML / navigations: network-first, но не дольше NAV_TIMEOUT_MS
   if (request.mode === 'navigate' || request.destination === 'document') {
     event.respondWith(
-      fetch(request)
+      fetchWithTimeout(request, NAV_TIMEOUT_MS)
         .then((res) => {
           const copy = res.clone()
           caches.open(CACHE).then((cache) => cache.put(request, copy))
           return res
         })
         .catch(() =>
-          caches.match(request).then((cached) => cached || caches.match('/')),
+          caches
+            .match(request)
+            .then((cached) => cached || caches.match(self.registration.scope)),
         ),
     )
     return
